@@ -14,6 +14,7 @@ import concurrent.futures
 
 log = get_logger('mybot')
 
+digit62 = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
 
 class DuckBot(Wechaty):
 
@@ -200,9 +201,23 @@ class DuckBot(Wechaty):
 
         # 推荐活动
         if room and re.match(r'.*bihu\.com.*', msg_text_inline):
-            match_results = re.search(r'(?<=bihu\.com/shortcontent/)\d{1,}', msg_text_inline.lower())
+            content_id = None
+            match_results = re.search(r'(?<=bihu\.com/s/)[0-9A-Za-z]{1,}', msg_text)
             if match_results:
-                content_id = match_results[0]
+                key = match_results[0]
+                x = 0
+                for y in key:
+                    k = digit62.find(y)
+                    if k >= 0:
+                       x = x * 62 + k
+                content_id = str(x)
+                log.info('transfer {} to {}'.format(key, content_id))
+            else:
+                match_results = re.search(r'(?<=bihu\.com/shortcontent/)\d{1,}', msg_text_inline.lower())
+                if match_results:
+                    content_id = match_results[0]
+
+            if content_id:
                 log.info('get content id = {}'.format(content_id))
                 data = None
                 with concurrent.futures.ThreadPoolExecutor() as executor:
