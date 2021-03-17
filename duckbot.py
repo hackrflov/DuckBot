@@ -6,6 +6,7 @@ from wechaty_puppet import get_logger
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 
+import os
 import re
 import cv2
 import random
@@ -233,8 +234,8 @@ class DuckBot(Wechaty):
                         reply = reply + ' @{}'.format(talker.name)
                         await room.say(reply, mention_ids=[talker.contact_id])
                         return
-                    elif datetime.now() - post_date > timedelta(days=1):
-                        reply = '文章太过久远，不能算入哦~'
+                    elif post_date < datetime(2021, 3, 18) or post_date >= datetime(2021, 3, 25):
+                        reply = '文章发布时间不在活动范围内，不能算入哦~'
                         reply = reply + ' @{}'.format(talker.name)
                         await room.say(reply, mention_ids=[talker.contact_id])
                         return
