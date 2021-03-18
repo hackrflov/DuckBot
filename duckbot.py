@@ -1,5 +1,5 @@
 import asyncio
-from wechaty import Wechaty, Message, UrlLink
+from wechaty import Wechaty, Message, UrlLink, Room, Contact
 import requests
 import time
 from wechaty_puppet import get_logger
@@ -50,8 +50,10 @@ class DuckBot(Wechaty):
 
         # 加载聊天室信息
         room = msg.room()
+        room_topic = None
         if room:
             await room.ready()
+            room_topic = await room.topic()
 
         # 基本信息
         msg_text = msg.text()
@@ -68,7 +70,7 @@ class DuckBot(Wechaty):
             'contact_id': talker.contact_id,
             'contact_name': talker.name,
             'room_id': room.room_id if room else None,
-            'room_name': room.topic if room else None,
+            'room_name': room_topic,
             'msg_id': msg_id,
             'msg_text': msg_text[:20],
             'created_at': datetime.now()
@@ -183,19 +185,35 @@ class DuckBot(Wechaty):
                     reply += '\n如果没法保持每天活跃，会被移出此群哦~'
                 await msg.say(reply)
 
-            elif 'c/kdashill' in msg_text:
-                today = datetime.now()
-                start_dt = datetime(today.year, today.month, today.day)
-                sql = """SELECT contact_id, max(contact_name) as contact_name, count(*) as score
-                        FROM {} group by contact_id""".format('kdashill_records')
-                self.db.cursor.execute(sql)
-                reply = '可达秀 [KDA-Shill] 活动积分排名\n'
-                rank = 0
-                for row in self.db.cursor.fetchall():
-                    rank += 1
-                    reply += '\n' + '{} - {}: {}分'.format(rank, row['contact_name'], row['score'])
+            elif 'c/updateroomname' in msg_text:
+                for i in range(3000):
+                    log.info('to update room name : {}'.format(i))
+                    sql = """SELECT * FROM {} WHERE id = {}""".format('msg_records', i)
+                    self.db.cursor.execute(sql)
+                    for row in self.db.cursor.fetchall():
+                        if row['room_id'] == 'None':
+                            break
+                        if 'bound' not in row['room_name']:
+                            break
+                        log.info(row)
+                        to_fix_room = self.Room(room_id=row['room_id'])
+                        log.info('get to fix room')
+                        await to_fix_room.ready()
+                        log.info('get to fix room ready')
+                        to_fix_room_name = await to_fix_room.topic()
+                        log.info('get to fix room name')
 
-                await room.say(reply)
+                        sql = """UPDATE {} SET room_name = '{}' where id = {}""".format('msg_records', to_fix_room_name, row['id'])
+                        try:
+                            self.db.cursor.execute(sql)
+                            self.db.db.commit()
+                            log.info('update succesfully: {}'.format(sql))
+                        except Exception as e:
+                            log.error(e)
+                            self.db.db.rollback()
+
+                    log.info('finished {}'.format(i))
+                    time.sleep(0.1)
 
             return
 
@@ -241,26 +259,60 @@ class DuckBot(Wechaty):
                         return
 
                     # 展示
+                    sql = """SELECT * FROM {} where content_id = '{}'""".format('kdashill_records', content_id)
+                    self.db.cursor.execute(sql)
+                    results = list(self.db.cursor.fetchall())
+                    if len(results):
+                        is_duplicate = True
+                        ww_id = results[0]['id']
+                        from_room = self.Room(room_id=results[0]['room_id'])
+                        await from_room.ready()
+                        from_room_name = await from_room.topic()
+                        room_name_str = '「{}」\n'.format(from_room_name.replace('Kadena', ''))
+                        from_contact = self.Contact(contact_id=results[0]['contact_id'])
+                        await from_contact.ready()
+                        from_contact_name = from_contact.name
+                    else:
+                        is_duplicate = False
+                        sql = """SELECT max(id) as max_id FROM {} """.format('kdashill_records')
+                        self.db.cursor.execute(sql)
+                        max_id = list(self.db.cursor.fetchall())[0]['max_id']
+                        ww_id = max_id + 1
+                        room_name_str = '「{}」\n'.format(room_topic.replace('Kadena', ''))
+                        from_contact_name = talker.name
+
                     reply_url = 'https://m.bihu.com/shortcontent/{}'.format(content_id)
-                    reply_title = '可达社区 @ {}'.format(talker.name)
+                    reply_title = '可达秀.{:02} @ {}'.format(ww_id, from_contact_name)
                     if 'imageUrlList' in data:
                         prefix = 'https://oss-cdn1.bihu-static.com/'
                         reply_thumbnail = prefix + data['imageUrlList'][0]
                     else:
-                        reply_thumbnail = ''
-                    reply_description = data['content'][:60]
+                        reply_thumbnail = 'https://m.bihu.com/static/img/pic300.jpg'
+                    reply_description = room_name_str + data['content'][:60]
                     log.info('to create url_link: {},{},{},{}'.format(reply_url, reply_title, reply_thumbnail, reply_description))
                     reply_link = UrlLink.create(reply_url, reply_title, reply_thumbnail, reply_description)
                     log.info('url created')
-                    await room.say(reply_link)
 
                     # 查重
-                    sql = """SELECT * FROM {} where content_id = '{}'""".format('kdashill_records', content_id)
-                    self.db.cursor.execute(sql)
-                    if len(list(self.db.cursor.fetchall())):
+                    if is_duplicate:
                         reply = '文章已有录入哦~'
                         reply = reply + ' @{}'.format(talker.name)
                         await room.say(reply, mention_ids=[talker.contact_id])
+
+                        # 发送至其他群
+                        #if talker.contact_id == self.god_contact_id:
+                        if False:
+                            sql = """SELECT room_id, max(room_name) as room_name FROM {} group by room_id""".format('msg_records')
+                            self.db.cursor.execute(sql)
+                            for row in self.db.cursor.fetchall():
+                                log.info('fetch row: {}'.format(row))
+                                if 'Kadena可达社区 #' in row['room_name'] and row['room_id'] != room.room_id:
+                                    forward_room = self.Room(room_id=row['room_id'])
+                                    log.info('get forward room')
+                                    await forward_room.ready()
+                                    log.info('get forward room ready')
+                                    await forward_room.say(reply_link)
+
                         return
 
                     # 记分
@@ -289,12 +341,27 @@ class DuckBot(Wechaty):
                     for row in self.db.cursor.fetchall():
                         rank += 1
                         if row['contact_id'] == talker.contact_id:
-                            reply = '感谢参加可达秀 [KDA-Shill] 活动！🍻\n'
+                            reply = '感谢参加可达秀 [KDA-Show] 活动！🍻\n'
                             reply += '您当前积分为{}，排名为{}'.format(row['score'], rank)
                             break
 
                     reply = reply + ' @{}'.format(talker.name)
                     await room.say(reply, mention_ids=[talker.contact_id])
+
+                    # 发送至其他群
+                    sql = """SELECT room_id, max(room_name) as room_name FROM {} group by room_id""".format('msg_records')
+                    self.db.cursor.execute(sql)
+                    for row in self.db.cursor.fetchall():
+                        if 'Kadena可达社区 #' in row['room_name']:
+                            forward_room = self.Room(room_id=row['room_id'])
+                            await forward_room.ready()
+                            try:
+                                await forward_room.say(reply_link)
+                            except Exception as e:
+                                log.exception(e)
+
+                            time.sleep(0.2)
+
                     return
 
                 else:
@@ -309,6 +376,37 @@ class DuckBot(Wechaty):
             await self.send_msg_with_keyword('新手指南', contact=talker, room=room)
             return
 
+        if msg_text == '可达秀':
+            today = datetime.now()
+            start_dt = datetime(today.year, today.month, today.day)
+            sql = """SELECT contact_id, max(contact_name) as contact_name, count(*) as score
+                    FROM {} group by contact_id order by score desc""".format('kdashill_records')
+            self.db.cursor.execute(sql)
+            reply = '可达秀 [KDA-SHOW] \n活动积分当前排名与积分\n'
+            records = list(self.db.cursor.fetchall())
+            pool_score = sum([row['score'] for index, row in enumerate(records) if index >= 3])
+            rank = 0
+            for index, row in enumerate(records):
+                rank += 1
+                reply += '\n' + '{} - {}: {}分'.format(rank, row['contact_name'], row['score'])
+                kda_cnt = 0
+                if index == 0:
+                    kda_cnt = 30
+                elif index == 1:
+                    kda_cnt = 20
+                elif index == 2:
+                    kda_cnt = 10
+                else:
+                    kda_cnt = round(40 * row['score'] / pool_score, 2)
+                reply += ' - {}枚KDA'.format(kda_cnt)
+
+            reply += '\n\n活动时间：3.18-3.24'
+
+            await room.say(reply)
+
+            return
+
+
         # AI回复
         if msg_type == 6 and (not room or '@{}'.format(self.my_contact_name) in msg_text):
             data = {
@@ -318,6 +416,7 @@ class DuckBot(Wechaty):
             }
             url = 'http://api.qingyunke.com/api.php'
             res = requests.get(url, params=data)
+            log.info('get AI request: {}, {}, response: {}'.format(url, data, res.text))
             data = res.json()
             reply = data['content'].replace('{br}', '\n')
             reply = reply + ' @{}'.format(talker.name)

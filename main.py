@@ -9,7 +9,7 @@ import os, signal
 def get_pids():
     pids = []
     cur_pid = os.getpid()
-    for line in os.popen('ps ax | grep duckbot.py'):
+    for line in os.popen('ps ax | grep main.py'):
         if 'grep' in line:
             continue
         fields = line.split()
