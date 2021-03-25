@@ -38,6 +38,9 @@ class DuckBot(Wechaty):
     def set_crawler(self, crawler):
         self.crawler = crawler
 
+    def set_telegram(self, telegram):
+        self.telegram = telegram
+
     async def on_message(self, msg: Message):
 
         # 加载消息发送者
@@ -185,35 +188,50 @@ class DuckBot(Wechaty):
                     reply += '\n如果没法保持每天活跃，会被移出此群哦~'
                 await msg.say(reply)
 
-            elif 'c/updateroomname' in msg_text:
-                for i in range(3000):
-                    log.info('to update room name : {}'.format(i))
-                    sql = """SELECT * FROM {} WHERE id = {}""".format('msg_records', i)
-                    self.db.cursor.execute(sql)
-                    for row in self.db.cursor.fetchall():
-                        if row['room_id'] == 'None':
-                            break
-                        if 'bound' not in row['room_name']:
-                            break
-                        log.info(row)
-                        to_fix_room = self.Room(room_id=row['room_id'])
-                        log.info('get to fix room')
-                        await to_fix_room.ready()
-                        log.info('get to fix room ready')
-                        to_fix_room_name = await to_fix_room.topic()
-                        log.info('get to fix room name')
+            elif 'c/fixroomname' in msg_text:
+                log.info('to fix room name')
+                sql = """SELECT * FROM {} WHERE room_id is not null and room_name = ''""".format('msg_records')
+                self.db.cursor.execute(sql)
+                for row in self.db.cursor.fetchall():
+                    to_fix_room = self.Room(room_id=row['room_id'])
+                    await to_fix_room.ready()
+                    to_fix_room_name = await to_fix_room.topic()
 
-                        sql = """UPDATE {} SET room_name = '{}' where id = {}""".format('msg_records', to_fix_room_name, row['id'])
+                    sql = """UPDATE {} SET room_name = '{}' where id = {}""".format('msg_records', to_fix_room_name, row['id'])
+                    try:
+                        self.db.cursor.execute(sql)
+                        self.db.db.commit()
+                        log.info('update succesfully: {}'.format(sql))
+                    except Exception as e:
+                        log.error(e)
+                        self.db.db.rollback()
+
+                log.info('finished')
+
+            elif 'c/kdashill_to_tg' in msg_text:
+                log.info('to send telegram')
+                sql = """SELECT * FROM {} WHERE has_sent_tg is null""".format('kdashill_records')
+                self.db.cursor.execute(sql)
+                for row in self.db.cursor.fetchall():
+                    url = 'https://m.bihu.com/shortcontent/{}'.format(row['content_id'])
+                    data = None
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        future = executor.submit(self.telegram.send_msg, url)
+                        data = future.result()
+
+                    log.info('get res: {}'.format(data))
+                    if data:
+                        sql = """UPDATE {} SET has_sent_tg = {} where content_id = '{}'""".format('kdashill_records', 1, row['content_id'])
                         try:
                             self.db.cursor.execute(sql)
                             self.db.db.commit()
                             log.info('update succesfully: {}'.format(sql))
                         except Exception as e:
                             log.error(e)
-                            self.db.db.rollback()
+                        self.db.db.rollback()
 
-                    log.info('finished {}'.format(i))
-                    time.sleep(0.1)
+                    time.sleep(1)
+                    break
 
             return
 
@@ -299,20 +317,6 @@ class DuckBot(Wechaty):
                         reply = reply + ' @{}'.format(talker.name)
                         await room.say(reply, mention_ids=[talker.contact_id])
 
-                        # 发送至其他群
-                        #if talker.contact_id == self.god_contact_id:
-                        if False:
-                            sql = """SELECT room_id, max(room_name) as room_name FROM {} group by room_id""".format('msg_records')
-                            self.db.cursor.execute(sql)
-                            for row in self.db.cursor.fetchall():
-                                log.info('fetch row: {}'.format(row))
-                                if 'Kadena可达社区 #' in row['room_name'] and row['room_id'] != room.room_id:
-                                    forward_room = self.Room(room_id=row['room_id'])
-                                    log.info('get forward room')
-                                    await forward_room.ready()
-                                    log.info('get forward room ready')
-                                    await forward_room.say(reply_link)
-
                         return
 
                     # 记分
@@ -352,7 +356,7 @@ class DuckBot(Wechaty):
                     sql = """SELECT room_id, max(room_name) as room_name FROM {} group by room_id""".format('msg_records')
                     self.db.cursor.execute(sql)
                     for row in self.db.cursor.fetchall():
-                        if 'Kadena可达社区 #' in row['room_name']:
+                        if '可达社区信息流' in row['room_name']:
                             forward_room = self.Room(room_id=row['room_id'])
                             await forward_room.ready()
                             try:
@@ -361,6 +365,9 @@ class DuckBot(Wechaty):
                                 log.exception(e)
 
                             time.sleep(0.2)
+
+                    # 发送至Telegram
+                    threading.Thread(target=self.telegram.send_msg, args=(reply_url)).start()
 
                     return
 

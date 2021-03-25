@@ -1,6 +1,7 @@
 from duckbot import DuckBot
 from duckdb import DuckDB
 from duckcrawler import DuckCrawler
+from ducktg import Telegram
 
 import asyncio
 import time
@@ -31,8 +32,12 @@ async def main():
 duck_db = DuckDB()
 duck_db.connect()
 duck_crawler = DuckCrawler()
+telegram = Telegram()
+
 bot = DuckBot()
 bot.set_db(duck_db)
 bot.set_crawler(duck_crawler)
+bot.set_telegram(telegram)
+
 kill_process()
 asyncio.run(main())
