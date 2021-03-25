@@ -2,16 +2,27 @@ import asyncio
 from wechaty import Wechaty, Message, UrlLink, Room, Contact
 import requests
 import time
-from wechaty_puppet import get_logger
+from wechaty_puppet import get_logger, FileBox
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 
 import os
 import re
 import cv2
+import json
 import random
+import base64
 import threading
 import concurrent.futures
+
+from selenium import webdriver
+from io import BytesIO
+from PIL import Image, ImageChops
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.by import By
+from selenium.common.exceptions import TimeoutException
 
 log = get_logger('mybot')
 
@@ -31,6 +42,11 @@ class DuckBot(Wechaty):
         'Kadena目前有多少条链？': '20',
         '本群的项目英文名是什么？': 'Kadena',
     }
+
+    def set_driver(self):
+        self.chrome_options = Options()
+        self.chrome_options.add_argument("--no-sandbox")
+        self.chrome_options.add_argument("--headless")
 
     def set_db(self, db):
         self.db = db
@@ -237,7 +253,7 @@ class DuckBot(Wechaty):
 
 
         # 推荐活动
-        if room and re.match(r'.*bihu\.com.*', msg_text_inline):
+        if room and re.match(r'.*[bihu|chainnode]\.com.*', msg_text_inline):
             content_id = None
             match_results = re.search(r'(?<=bihu\.com/s/)[0-9A-Za-z]{1,}', msg_text)
             if match_results:
@@ -248,39 +264,50 @@ class DuckBot(Wechaty):
                     if k >= 0:
                        x = x * 62 + k
                 content_id = str(x)
+                platform = 'bihu'
                 log.info('transfer {} to {}'.format(key, content_id))
-            else:
+            elif 'bihu' in msg_text:
                 match_results = re.search(r'(?<=bihu\.com/shortcontent/)\d{1,}', msg_text_inline.lower())
-                if match_results:
-                    content_id = match_results[0]
+                content_id = match_results[0]
+                platform = 'bihu'
+            elif 'chainnode' in msg_text:
+                match_results = re.search(r'(?<=chainnode\.com/post/)\d{1,}', msg_text_inline.lower())
+                content_id = match_results[0]
+                platform = 'chainnode'
+            else:
+                log.info('not find pattern')
 
             if content_id:
                 log.info('get content id = {}'.format(content_id))
                 data = None
                 with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(self.crawler.fetch_bihu, content_id)
+                    if platform == 'bihu':
+                        future = executor.submit(self.crawler.fetch_bihu, content_id)
+                    else:
+                        future = executor.submit(self.crawler.fetch_chainnode, content_id)
                     data = future.result()
 
-                log.info('fetched bihu data = {}'.format(data))
+                log.info('fetched data = {}'.format(data))
                 if data:
                     content_inline = data['content'].replace('\n', '')
-                    post_date = datetime.fromtimestamp(data['createTS'] // 1000)
+                    post_date = data['post_date']
                     if not re.match(r'.*(kda|kadena|可达).*', content_inline.lower()):
                         reply = '未发现Kadena相关信息哦~'
                         reply = reply + ' @{}'.format(talker.name)
                         await room.say(reply, mention_ids=[talker.contact_id])
                         return
-                    elif post_date < datetime(2021, 3, 18) or post_date >= datetime(2021, 3, 25):
+                    elif post_date < datetime(2021, 3, 26) or post_date >= datetime(2021, 4, 2):
                         reply = '文章发布时间不在活动范围内，不能算入哦~'
                         reply = reply + ' @{}'.format(talker.name)
                         await room.say(reply, mention_ids=[talker.contact_id])
                         return
 
                     # 展示
-                    sql = """SELECT * FROM {} where content_id = '{}'""".format('kdashill_records', content_id)
+                    sql = """SELECT * FROM {} where phase = 1 and platform = '{}' and content_id = '{}'""".format('kdashill_records', platform, content_id)
                     self.db.cursor.execute(sql)
                     results = list(self.db.cursor.fetchall())
                     if len(results):
+                        # 处理重复
                         is_duplicate = True
                         ww_id = results[0]['id']
                         from_room = self.Room(room_id=results[0]['room_id'])
@@ -299,13 +326,22 @@ class DuckBot(Wechaty):
                         room_name_str = '「{}」\n'.format(room_topic.replace('Kadena', ''))
                         from_contact_name = talker.name
 
-                    reply_url = 'https://m.bihu.com/shortcontent/{}'.format(content_id)
                     reply_title = '可达秀.{:02} @ {}'.format(ww_id, from_contact_name)
-                    if 'imageUrlList' in data:
-                        prefix = 'https://oss-cdn1.bihu-static.com/'
-                        reply_thumbnail = prefix + data['imageUrlList'][0]
+                    if platform == 'bihu':
+                        reply_url = 'https://m.bihu.com/shortcontent/{}'.format(content_id)
+                        score = 1
+                        if 'img_url' in data:
+                            prefix = 'https://oss-cdn1.bihu-static.com/'
+                            reply_thumbnail = prefix + data['img_url']
+                        else:
+                            reply_thumbnail = 'https://m.bihu.com/static/img/pic300.jpg'
                     else:
-                        reply_thumbnail = 'https://m.bihu.com/static/img/pic300.jpg'
+                        score = 2
+                        reply_url = 'https://www.chainnode.com/post/{}'.format(content_id)
+                        if 'img_url' in data:
+                            reply_thumbnail = data['img_url']
+                        else:
+                            reply_thumbnail = 'https://webcdn.chainnode.com/mobile-1.3.15/img/ChainNode.4e5601a.svg'
                     reply_description = room_name_str + data['content'][:60]
                     log.info('to create url_link: {},{},{},{}'.format(reply_url, reply_title, reply_thumbnail, reply_description))
                     reply_link = UrlLink.create(reply_url, reply_title, reply_thumbnail, reply_description)
@@ -321,11 +357,14 @@ class DuckBot(Wechaty):
 
                     # 记分
                     insert_data = {
+                        'phase': 2,
+                        'platform': platform,
                         'content_id': content_id,
                         'contact_id': talker.contact_id,
                         'contact_name': talker.name,
                         'room_id': room.room_id,
-                        'created_at': datetime.now()
+                        'created_at': datetime.now(),
+                        'score': score,
                     }
                     keys = ','.join(['`{}`'.format(str(v)) for v in insert_data.keys()])
                     values = ','.join(['\'{}\''.format(str(v)) for v in insert_data.values()])
@@ -339,7 +378,7 @@ class DuckBot(Wechaty):
                         self.db.db.rollback()
 
                     # 报积分
-                    sql = """SELECT contact_id, count(*) as score FROM {} group by contact_id order by score desc""".format('kdashill_records')
+                    sql = """SELECT contact_id, sum(score) as score FROM {} where phase = 2 group by contact_id order by score desc""".format('kdashill_records')
                     self.db.cursor.execute(sql)
                     rank = 0
                     for row in self.db.cursor.fetchall():
@@ -364,10 +403,8 @@ class DuckBot(Wechaty):
                             except Exception as e:
                                 log.exception(e)
 
-                            time.sleep(0.2)
-
                     # 发送至Telegram
-                    threading.Thread(target=self.telegram.send_msg, args=(reply_url)).start()
+                    #threading.Thread(target=self.telegram.send_msg, args=(reply_url)).start()
 
                     return
 
@@ -383,10 +420,87 @@ class DuckBot(Wechaty):
             await self.send_msg_with_keyword('新手指南', contact=talker, room=room)
             return
 
+        coin_dict = {
+            'kda': 'kadena',
+            'btc': 'bitcoin',
+            'eth': 'ethereum',
+            'dot': 'polkadot',
+            'link': 'chainlink',
+            'atom': 'cosmos',
+            'mkr': 'maker',
+            'luna': 'terra-luna',
+            'celo': 'celo',
+        }
+        if room and msg_text.lower() in coin_dict:
+            name = msg_text.lower()
+            full_name = coin_dict[name]
+            url = 'https://api.coingecko.com/api/v3/coins/{}/market_chart?vs_currency=usd&days=30&interval=daily'.format(full_name)
+            data = requests.get(url).json()
+            log.info('get chart, response: {}'.format(data))
+            url = 'http://localhost:5000/chart-data'
+            post_data = {
+                'name': name.upper(),
+                'prices': [],
+                'volumes': [],
+                'marketCaps': []
+            }
+            log.info(len(data['prices']))
+            for i in range(len(data['prices'])):
+                post_data['prices'].append({
+                    'time': datetime.fromtimestamp(data['prices'][i][0] // 1000).strftime('%Y-%m-%d'),
+                    'value': data['prices'][i][1],
+                })
+                post_data['volumes'].append('{:,d}'.format(int(data['total_volumes'][i][1])))
+                post_data['marketCaps'].append('{:,d}'.format(int(data['market_caps'][i][1])))
+            log.info('remove chart')
+            os.system('cp chart/db-example.json chart/db.json')
+            time.sleep(0.1)
+            post_data = json.dumps(post_data)
+            log.info('post data: {}'.format(post_data))
+            headers = {'Content-Type': 'application/json'}
+            time.sleep(0.5)
+            res = requests.post(url, data=post_data, headers=headers)
+            time.sleep(0.5)
+            log.info('ready to fetch html')
+            log.info('kkkkkk1')
+            log.info('kkkkkk2')
+            self.driver = webdriver.Chrome(options=self.chrome_options)
+            self.driver.get('http://localhost:8000/')
+            log.info('kkkkkk3')
+            log.info('now get web')
+            delay = 5
+            try:
+                log.info('kkkkkk4')
+                myElem = WebDriverWait(self.driver, delay).until(EC.presence_of_element_located((By.ID, 'chart')))
+                log.info('Page is ready!')
+            except TimeoutException:
+                log.indo('Loading took too much time!')
+
+            # Create image to local
+            file_path = '/var/www/html/{}-chart.png'.format(name)
+            self.driver.save_screenshot(file_path)
+            self.driver.quit()
+
+            # Crop image
+            log.info('now crop image')
+            im = Image.open(file_path)
+            im_cut = im.crop([0, 0, im.size[0], 350])
+            im_cut.save(file_path)
+
+            # Send image
+            with open(file_path, 'rb') as f:
+                content = base64.b64encode(f.read())
+                file_box = FileBox.from_base64(name='{}-chart.png'.format(name), base64=content)
+                await room.say(file_box)
+
+            os.system('pkill -f chrome')
+
+            return
+
         if msg_text == '可达秀':
             today = datetime.now()
             start_dt = datetime(today.year, today.month, today.day)
-            sql = """SELECT contact_id, max(contact_name) as contact_name, count(*) as score
+            sql = """SELECT contact_id, max(contact_name) as contact_name, sum(score) as score
                     FROM {} group by contact_id order by score desc""".format('kdashill_records')
             self.db.cursor.execute(sql)
             reply = '可达秀 [KDA-SHOW] \n活动积分当前排名与积分\n'

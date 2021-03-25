@@ -35,6 +35,7 @@ duck_crawler = DuckCrawler()
 telegram = Telegram()
 
 bot = DuckBot()
+bot.set_driver()
 bot.set_db(duck_db)
 bot.set_crawler(duck_crawler)
 bot.set_telegram(telegram)
